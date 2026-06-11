@@ -1,0 +1,6 @@
+{
+  "name": "SmartNote AI",
+  "description": "Intelligent note-taking platform that automatically summarizes notes, generates key action items, flashcards, quizzes, and mind maps in real-time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

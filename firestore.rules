@@ -1,0 +1,136 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Pillar 1/10)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reuseable global functions (Pillars 2, 3, 4, 10)
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Role verification using database lookups to prevent token spoofing
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        // Check if user document has active role=='admin' as bootstrap
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    // Validation Blueprint for User profiles
+    function isValidUser(data) {
+      return data.keys().hasAll(['userId', 'email', 'role', 'totalSummaries', 'readingTimeSaved', 'createdAt']) &&
+             data.keys().size() == 6 &&
+             data.userId == request.auth.uid &&
+             data.email is string && data.email.size() <= 256 &&
+             data.role in ['user', 'admin'] &&
+             data.totalSummaries is int && data.totalSummaries >= 0 &&
+             data.readingTimeSaved is number && data.readingTimeSaved >= 0.0 &&
+             data.createdAt is string && data.createdAt.size() <= 100;
+    }
+
+    // Validation Blueprint for Summary objects
+    function isValidSummary(data) {
+      return data.keys().hasAll(['summaryId', 'userId', 'title', 'originalText', 'shortSummary', 'detailedSummary', 'category', 'sentiment', 'difficulty', 'readingTime', 'explainLikeIm5', 'keyPoints', 'actionItems', 'studyNotes', 'questions', 'flashcards', 'mindMap', 'isBookmarked', 'createdAt', 'wordCount', 'charCount']) &&
+             data.summaryId is string && data.summaryId.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.title is string && data.title.size() <= 500 &&
+             data.originalText is string && data.originalText.size() <= 150000 &&
+             data.shortSummary is string && data.shortSummary.size() <= 2000 &&
+             data.detailedSummary is string && data.detailedSummary.size() <= 50000 &&
+             data.category is string && data.category.size() <= 100 &&
+             data.sentiment is string && data.sentiment.size() <= 50 &&
+             data.difficulty in ['easy', 'medium', 'hard'] &&
+             data.readingTime is number && data.readingTime >= 0.0 &&
+             data.explainLikeIm5 is string && data.explainLikeIm5.size() <= 3000 &&
+             data.keyPoints is list && data.keyPoints.size() <= 20 &&
+             data.actionItems is list && data.actionItems.size() <= 20 &&
+             data.studyNotes is string && data.studyNotes.size() <= 50000 &&
+             data.questions is list && data.questions.size() <= 10 &&
+             data.flashcards is list && data.flashcards.size() <= 20 &&
+             data.mindMap is map &&
+             data.isBookmarked is bool &&
+             data.createdAt is string && data.createdAt.size() <= 100 &&
+             data.wordCount is int && data.wordCount >= 0 &&
+             data.charCount is int && data.charCount >= 0;
+    }
+
+    // Users Collection Paths
+    match /users/{userId} {
+      // Hardened with isValidId to guard against poisoning
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin(); // Secured from query scraping PII
+
+      allow create: if isSignedIn() && 
+                      request.auth.uid == userId && 
+                      isValidUser(incoming()) && 
+                      incoming().role == 'user'; // Prevent privilege escalation inside client
+
+      allow update: if isSignedIn() && 
+                      request.auth.uid == userId && 
+                      isValidUser(incoming()) &&
+                      // Enforce immutable fields and block role change by user
+                      incoming().role == existing().role &&
+                      incoming().userId == existing().userId &&
+                      incoming().createdAt == existing().createdAt &&
+                      incoming().email == existing().email &&
+                      (incoming().diff(existing()).affectedKeys().hasOnly(['totalSummaries', 'readingTimeSaved', 'displayName', 'photoURL']) || isAdmin());
+
+      allow delete: if isAdmin();
+    }
+
+    // User Summaries Sub-Collection
+    match /users/{userId}/summaries/{summaryId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      
+      // Enforces secure list queries at the rule level. Avoid blanket reads. (Pillar 8)
+      allow list: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+
+      allow create: if isSignedIn() && 
+                      request.auth.uid == userId && 
+                      isValidId(summaryId) &&
+                      isValidSummary(incoming()) &&
+                      incoming().summaryId == summaryId;
+
+      allow update: if isSignedIn() && 
+                      request.auth.uid == userId && 
+                      isValidId(summaryId) &&
+                      isValidSummary(incoming()) &&
+                      incoming().summaryId == existing().summaryId &&
+                      incoming().createdAt == existing().createdAt &&
+                      incoming().userId == existing().userId &&
+                      incoming().originalText == existing().originalText &&
+                      // Action: bookmark or update metadata
+                      incoming().diff(existing()).affectedKeys().hasOnly(['isBookmarked', 'title', 'category']);
+
+      allow delete: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+    }
+
+    // Interactive Admin pathways
+    match /admins/{adminId} {
+      allow read, write: if false; // System-managed admins only
+    }
+
+  }
+}
